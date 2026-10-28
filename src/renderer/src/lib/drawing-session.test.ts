@@ -117,6 +117,26 @@ describe("createDrawingSession", () => {
     expect(dirty).toHaveBeenLastCalledWith("f1", false);
   });
 
+  it("does not dirty the drawing for viewport-only changes", async () => {
+    const { session, dirty, save } = makeSession();
+    const initialBaseline = drawingSignature([el("a")], appState(), emptyFiles);
+    session.setInitialBaseline(initialBaseline);
+    session.onChange([el("a")], appState(), emptyFiles);
+    const viewportAppState = {
+      ...appState(),
+      scrollX: 120,
+      scrollY: -80,
+      zoom: { value: 2 },
+    } as unknown as AppState;
+    session.onChange([el("a")], viewportAppState, emptyFiles);
+
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(6000);
+
+    expect(dirty).not.toHaveBeenCalled();
+    expect(save).not.toHaveBeenCalled();
+  });
+
   it("clears dirty when the user reverts to the baseline", async () => {
     const { session, dirty, save } = makeSession();
 
@@ -218,6 +238,15 @@ describe("createDrawingSession", () => {
     });
     session.onChange([el("a")], appState(), emptyFiles);
     expect(await session.saveNow()).toBe("unchanged");
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it("does not write an unchanged loaded drawing during an explicit flush", async () => {
+    const { session, save } = makeSession({
+      initialBaseline: drawingSignature([el("a")], appState(), emptyFiles),
+    });
+    session.onChange([el("a")], appState(), emptyFiles);
+    await session.flush({ explicit: true });
     expect(save).not.toHaveBeenCalled();
   });
 

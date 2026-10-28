@@ -37,6 +37,7 @@ const setup = (mode: AutosaveSetting["mode"] = "interval") => {
   let session: ReturnType<CloseFlowDeps["getSession"]> = null;
   const addToast = vi.fn();
   const reportError = vi.fn();
+  const flushViewports = vi.fn().mockResolvedValue(undefined);
   const canvasAction = subscribeOver(() => state.pendingCanvasAction);
   const handler = createCloseFlow({
     getState: () => state,
@@ -44,6 +45,7 @@ const setup = (mode: AutosaveSetting["mode"] = "interval") => {
     windowApi,
     waitForCanvasActionSettled: () =>
       waitForCanvasActionSettled(() => state.pendingCanvasAction, canvasAction.subscribe),
+    flushViewports,
     addToast,
     reportError,
   });
@@ -62,6 +64,7 @@ const setup = (mode: AutosaveSetting["mode"] = "interval") => {
     windowApi,
     addToast,
     reportError,
+    flushViewports,
     handler,
     adoptSession,
     canvasActionEmit: canvasAction.emit,
@@ -95,6 +98,7 @@ describe("close flow", () => {
     expect(flow.windowApi.close).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(100);
     const session = flow.adoptSession();
+    session.isDirty.mockReturnValueOnce(true).mockReturnValue(false);
     const saving = Promise.withResolvers<void>();
     session.flush.mockReturnValue(saving.promise);
     flow.state.pendingCanvasAction = false;
@@ -105,9 +109,21 @@ describe("close flow", () => {
     expect(flow.windowApi.close).not.toHaveBeenCalled();
     saving.resolve();
     await closing;
+    expect(flow.flushViewports).toHaveBeenCalledOnce();
     expect(flow.windowApi.close).toHaveBeenCalledExactlyOnceWith(42);
     expect(flow.windowApi.cancelQuit).not.toHaveBeenCalled();
     expect(isCloseHandshakeActive()).toBe(false);
+  });
+
+  it("does not force-save a clean session but still flushes viewport preferences", async () => {
+    const flow = setup();
+    const session = flow.adoptSession();
+    await flow.handler({ kind: "flush", requestId: 42 });
+    expect(session.evaluateNow).toHaveBeenCalledOnce();
+    expect(session.flush).toHaveBeenCalledExactlyOnceWith({ explicit: true });
+    expect(flow.flushViewports).toHaveBeenCalledOnce();
+    expect(flow.windowApi.close).toHaveBeenCalledExactlyOnceWith(42);
+    expect(flow.windowApi.cancelQuit).not.toHaveBeenCalled();
   });
 
   it("cancels quit when captured strokes have no owning session", async () => {
