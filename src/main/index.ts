@@ -38,6 +38,7 @@ import {
   registerIpcHandlers,
 } from "./ipc";
 import { initLogger, log } from "./logger";
+import { applyMcpSetting } from "./mcp";
 import { applyTheme, getSettings, setSettings, applyWindowBgColor } from "./settings";
 import { getLastOpenedFileId, getRecentFileIds } from "./store";
 import { pruneThumbnailCache, readThumbnailRecords, writeThumbnailRecord } from "./thumbnails";
@@ -498,9 +499,17 @@ void app.whenReady().then(async () => {
     onFlushStarted,
     showUnsavedChangesDialog,
     getSettings,
-    updateSettings: (update) => {
+    updateSettings: async (update) => {
       const settings = setSettings(update);
       applyUpdatePreferences();
+      if (update.mcpServer === undefined) return settings;
+      try {
+        await applyMcpSetting(settings.mcpServer);
+      } catch (error) {
+        // Don't leave the switch on with nothing listening.
+        setSettings({ mcpServer: false });
+        throw error;
+      }
       return settings;
     },
     getThumbnails: readThumbnailRecords,
@@ -549,6 +558,7 @@ void app.whenReady().then(async () => {
   }
 
   void runUpdateCheck({ alertOnFail: false, trigger: "boot" });
+  void applyMcpSetting(getSettings().mcpServer).catch(() => undefined);
 
   app.on("second-instance", () => {
     void surfacePrimaryUi().catch((error) => log.error("[ui] surface failed", error));
