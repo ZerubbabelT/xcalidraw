@@ -313,26 +313,38 @@ export const TreeRow = ({
         <span className="relative min-w-0 flex-1 truncate text-sidebar-foreground/90 transition-colors group-hover/row:text-sidebar-foreground group-data-[active=true]/row:text-sidebar-foreground">
           {label}
         </span>
-        {isDirty ? (
-          <>
-            <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-primary" />
-            <span className="sr-only">(unsaved changes)</span>
-          </>
-        ) : null}
       </button>
-      {(!isDirty && timeLabel) || onMenuClick ? (
+      {timeLabel || onMenuClick || isDirty ? (
         <div className="relative grid shrink-0 items-center justify-items-end">
-          {!isDirty && timeLabel ? (
+          {timeLabel && !isDirty ? (
             <span
               data-testid="tree-row-time"
               className={cn(
                 "col-start-1 row-start-1 font-mono text-[10.5px] text-muted-foreground/80",
-                onMenuClick && "group-hover/row:invisible group-focus-within/row:invisible",
+                onMenuClick &&
+                  "group-hover/row:invisible group-focus-within/row:invisible",
               )}
             >
               {timeLabel}
             </span>
           ) : null}
+
+          {isDirty ? (
+            <>
+              <span
+                aria-hidden
+                className={cn(
+                  "col-start-1 row-start-1 flex size-[18px] items-center justify-center",
+                  onMenuClick &&
+                    "group-hover/row:invisible group-focus-within/row:invisible",
+                )}
+              >
+                <span className="size-1.5 rounded-full bg-primary" />
+              </span>
+              <span className="sr-only">(unsaved changes)</span>
+            </>
+          ) : null}
+
           {onMenuClick ? (
             <button
               type="button"
