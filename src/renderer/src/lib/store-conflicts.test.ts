@@ -92,7 +92,11 @@ beforeEach(() => {
   write.mockReset().mockResolvedValue(entry(150));
   unsavedChanges.mockReset().mockResolvedValue("cancel");
   vi.stubGlobal("window", {
-    api: { files: { write }, dialog: { unsavedChanges }, store: { set: vi.fn() } },
+    api: {
+      files: { write },
+      dialog: { unsavedChanges },
+      store: { get: vi.fn().mockResolvedValue(null), set: vi.fn() },
+    },
   });
   useStore.setState(useStore.getInitialState(), true);
   useStore.setState({ entries: [entry(100)], openFileId: fileId, editorGeneration: 7 });
@@ -243,6 +247,197 @@ describe("deleteEntry", () => {
 
     expect(await useStore.getState().deleteEntry(fileId, "permanent")).toBe(false);
     expect(del).not.toHaveBeenCalled();
+  });
+});
+
+const folderEntry = (
+  id: string,
+  parentId: string | null,
+  kind: "file" | "directory" = "file",
+): FileEntry => ({
+  id,
+  name: id.split("/").pop() ?? id,
+  kind,
+  parentId,
+  modifiedAt: 100,
+  size: kind === "file" ? 10 : 0,
+  ino: "1",
+  dev: "1",
+});
+
+describe("moveEntry", () => {
+  it("preserves unsaved edits when moving a folder fails", async () => {
+    const move = vi.fn().mockRejectedValue(new Error("destination already exists"));
+    Object.assign(window.api.files, { move });
+    const { session, fireFrame } = openSession("notes/a.excalidraw", { mode: "off" });
+    useStore.setState({
+      entries: [
+        folderEntry("notes", null, "directory"),
+        folderEntry("notes/a.excalidraw", "notes"),
+      ],
+      openFileId: "notes/a.excalidraw",
+    });
+    session.onChange(elements, appState, files);
+    fireFrame();
+
+    await expect(useStore.getState().moveEntry("notes", "archive")).rejects.toThrow(
+      "destination already exists",
+    );
+    expect(move).toHaveBeenCalledWith("notes", "archive");
+    expect(unsavedChanges).not.toHaveBeenCalled();
+    expect(session.isDirty()).toBe(true);
+    expect(useStore.getState().dirtyById).toEqual({ "notes/a.excalidraw": true });
+  });
+
+  it("does not apply a late move to a different drawings folder", async () => {
+    const pending = Promise.withResolvers<FileEntry>();
+    const move = vi.fn(() => pending.promise);
+    Object.assign(window.api.files, { move });
+    useStore.setState({
+      drawings: {
+        path: "/first",
+        displayPath: "/first",
+        displayName: "first",
+        configured: true,
+        missing: false,
+      },
+      entries: [
+        folderEntry("notes", null, "directory"),
+        folderEntry("notes/a.excalidraw", "notes"),
+      ],
+    });
+
+    const moving = useStore.getState().moveEntry("notes", "archive");
+    useStore.setState({
+      drawings: {
+        path: "/second",
+        displayPath: "/second",
+        displayName: "second",
+        configured: true,
+        missing: false,
+      },
+      entries: [
+        folderEntry("notes", null, "directory"),
+        folderEntry("notes/a.excalidraw", "notes"),
+      ],
+    });
+    pending.resolve(folderEntry("archive/notes", "archive", "directory"));
+
+    expect(await moving).toBeNull();
+    expect(useStore.getState().entries.map((item) => item.id)).toEqual([
+      "notes",
+      "notes/a.excalidraw",
+    ]);
+  });
+
+  it("remaps the open drawing, a dirty sibling, and recents", async () => {
+    const moved = folderEntry("archive/notes", "archive", "directory");
+    const move = vi.fn().mockResolvedValue(moved);
+    const set = vi.fn();
+    Object.assign(window.api.files, { move });
+    Object.assign(window.api, { store: { set } });
+    useStore.setState({
+      entries: [
+        folderEntry("notes", null, "directory"),
+        folderEntry("notes/a.excalidraw", "notes"),
+        folderEntry("notes/b.excalidraw", "notes"),
+      ],
+      openFileId: "notes/a.excalidraw",
+      dirtyById: { "notes/b.excalidraw": true },
+      recentFileIds: ["notes/a.excalidraw"],
+      externalConflict: {
+        type: "changed",
+        fileId: "notes/a.excalidraw",
+        diskModifiedAt: 200,
+      },
+      homeReturnFileId: "notes/a.excalidraw",
+    });
+
+    const result = await useStore.getState().moveEntry("notes", "archive");
+
+    expect(result).toBe(moved);
+    expect(move).toHaveBeenCalledWith("notes", "archive");
+    expect(useStore.getState().openFileId).toBe("archive/notes/a.excalidraw");
+    expect(useStore.getState().dirtyById).toEqual({ "archive/notes/b.excalidraw": true });
+    expect(useStore.getState().recentFileIds).toEqual(["archive/notes/a.excalidraw"]);
+    expect(useStore.getState().externalConflict).toEqual({
+      type: "changed",
+      fileId: "archive/notes/a.excalidraw",
+      diskModifiedAt: 200,
+    });
+    expect(useStore.getState().homeReturnFileId).toBe("archive/notes/a.excalidraw");
+    expect(set).toHaveBeenCalledWith("lastOpenedFileId", "archive/notes/a.excalidraw");
+    expect(useStore.getState().entries.map((item) => item.id)).toEqual([
+      "archive/notes",
+      "archive/notes/a.excalidraw",
+      "archive/notes/b.excalidraw",
+    ]);
+  });
+});
+
+describe("copyEntry", () => {
+  it("copies the disk version of an unsaved open drawing without asking to discard it", async () => {
+    const created = [folderEntry("a copy.excalidraw", null)];
+    const copy = vi.fn().mockResolvedValue(created);
+    Object.assign(window.api.files, { copy });
+    const { session, fireFrame } = openSession(fileId, { mode: "off" });
+    session.onChange(elements, appState, files);
+    fireFrame();
+
+    expect(await useStore.getState().copyEntry(fileId, null)).toBe("a copy.excalidraw");
+    expect(unsavedChanges).not.toHaveBeenCalled();
+    expect(copy).toHaveBeenCalledWith(fileId, null);
+  });
+
+  it("does not insert a late copy into a different drawings folder", async () => {
+    const pending = Promise.withResolvers<FileEntry[]>();
+    const copy = vi.fn(() => pending.promise);
+    Object.assign(window.api.files, { copy });
+    useStore.setState({
+      drawings: {
+        path: "/first",
+        displayPath: "/first",
+        displayName: "first",
+        configured: true,
+        missing: false,
+      },
+    });
+
+    const copying = useStore.getState().copyEntry(fileId, null);
+    useStore.setState({
+      drawings: {
+        path: "/second",
+        displayPath: "/second",
+        displayName: "second",
+        configured: true,
+        missing: false,
+      },
+      entries: [folderEntry(fileId, null)],
+    });
+    pending.resolve([folderEntry("a copy.excalidraw", null)]);
+
+    expect(await copying).toBeNull();
+    expect(useStore.getState().entries.map((item) => item.id)).toEqual([fileId]);
+  });
+
+  it("inserts the copied entries without changing the open drawing", async () => {
+    const created = [folderEntry("a copy.excalidraw", null)];
+    const copy = vi.fn().mockResolvedValue(created);
+    Object.assign(window.api.files, { copy });
+    useStore.setState({
+      entries: [folderEntry(fileId, null)],
+      openFileId: fileId,
+    });
+
+    expect(await useStore.getState().copyEntry(fileId, "notes")).toBe("a copy.excalidraw");
+    expect(copy).toHaveBeenCalledWith(fileId, "notes");
+    expect(useStore.getState().openFileId).toBe(fileId);
+    expect(
+      useStore
+        .getState()
+        .entries.map((item) => item.id)
+        .toSorted(),
+    ).toEqual(["a copy.excalidraw", fileId]);
   });
 });
 

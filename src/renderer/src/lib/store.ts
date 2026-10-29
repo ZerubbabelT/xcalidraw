@@ -155,6 +155,8 @@ export type State = {
   openReservedFile: (fileId: string) => Promise<boolean>;
   openHome: () => Promise<void>;
   renameEntry: (id: string, newName: string) => Promise<FileEntry | null>;
+  moveEntry: (id: string, parentId: string | null) => Promise<FileEntry | null>;
+  copyEntry: (id: string, parentId: string | null) => Promise<string | null>;
   deleteEntry: (id: string, mode: FileDeleteMode) => Promise<boolean>;
   createEntry: (
     parentId: string | null,
@@ -274,6 +276,92 @@ export const useStore = create<State>((set, get) => {
     const nextSwitcherFileIds = pushSwitcherId(switcherFileIds, fileId);
     set({ recentFileIds: nextRecentFileIds, switcherFileIds: nextSwitcherFileIds });
     persistRecentFileIds(drawings?.path ?? null, nextRecentFileIds);
+  };
+
+  const confirmSubtreeChange = async (id: string) => {
+    const openId = get().openFileId;
+    if (
+      isInsideSubtree(id, openId) &&
+      isUnsaved(openId, {
+        rawDirtyById: get().rawDirtyById,
+        getSession: sessionOwner.getSession,
+      })
+    ) {
+      return get().ensureCleanOrConfirm("switch");
+    }
+    return true;
+  };
+
+  const commitSubtreeRemap = async (
+    oldId: string,
+    entry: FileEntry,
+    expectedRootPath: string | null,
+  ) => {
+    const rootPath = expectedRootPath;
+    viewportCache.remapSubtree(rootPath, oldId, entry.id);
+    await viewportPersistence.remapSubtree(rootPath, oldId, entry.id).catch((error: unknown) => {
+      console.error("Failed to remap viewport preferences:", error);
+    });
+    if ((get().drawings?.path ?? null) !== expectedRootPath) return null;
+
+    const activeSessionFileId = sessionOwner.getActiveFileId();
+    if (activeSessionFileId) {
+      const remappedActive = remapId(activeSessionFileId, oldId, entry.id);
+      if (remappedActive !== activeSessionFileId) {
+        sessionOwner.retargetActive(activeSessionFileId, remappedActive);
+      }
+    }
+
+    const {
+      entries,
+      openFileId,
+      dirtyById,
+      rawDirtyById,
+      recentFileIds,
+      switcherFileIds,
+      externalConflict,
+    } = get();
+    const next = applySubtreeRemap(
+      { entries, openFileId, dirtyById, rawDirtyById },
+      oldId,
+      entry.id,
+      {
+        rootEntry: entry,
+        sort: true,
+      },
+    );
+
+    const pairs = new Map<string, string>();
+    for (const existing of entries) {
+      const mapped = remapId(existing.id, oldId, entry.id);
+      if (mapped !== existing.id) pairs.set(existing.id, mapped);
+    }
+
+    const nextRecentFileIds = remapRecentIds(recentFileIds, (rid) => pairs.get(rid) ?? rid);
+    const recentChanged = !sameIdList(nextRecentFileIds, recentFileIds);
+    const nextSwitcherFileIds = remapRecentIds(switcherFileIds, (rid) => pairs.get(rid) ?? rid);
+    const switcherChanged = !sameIdList(nextSwitcherFileIds, switcherFileIds);
+
+    set({
+      entries: next.entries,
+      openFileId: next.openFileId,
+      dirtyById: next.dirtyById,
+      rawDirtyById: next.rawDirtyById,
+      homeReturnFileId: remapNullableId(get().homeReturnFileId, oldId, entry.id),
+      externalConflict: externalConflict
+        ? { ...externalConflict, fileId: remapId(externalConflict.fileId, oldId, entry.id) }
+        : null,
+      ...(recentChanged ? { recentFileIds: nextRecentFileIds } : {}),
+      ...(switcherChanged ? { switcherFileIds: nextSwitcherFileIds } : {}),
+      error: null,
+    });
+    if (recentChanged) persistRecentFileIds(get().drawings?.path ?? null, nextRecentFileIds);
+
+    if (next.openFileId !== openFileId) {
+      void window.api.store.set("lastOpenedFileId", next.openFileId);
+    }
+
+    return entry;
   };
 
   return {
@@ -483,72 +571,32 @@ export const useStore = create<State>((set, get) => {
     },
 
     renameEntry: async (id, newName) => {
-      const openId = get().openFileId;
-      if (
-        isInsideSubtree(id, openId) &&
-        isUnsaved(openId, {
-          rawDirtyById: get().rawDirtyById,
-          getSession: sessionOwner.getSession,
-        })
-      ) {
-        const ok = await get().ensureCleanOrConfirm("switch");
-        if (!ok) return null;
-      }
-
-      const entry = await window.api.files.rename(id, newName);
       const rootPath = get().drawings?.path ?? null;
-      viewportCache.remapSubtree(rootPath, id, entry.id);
-      await viewportPersistence.remapSubtree(rootPath, id, entry.id).catch((error: unknown) => {
-        console.error("Failed to remap viewport preferences:", error);
+      if (!(await confirmSubtreeChange(id))) return null;
+      const entry = await window.api.files.rename(id, newName);
+      if ((get().drawings?.path ?? null) !== rootPath) return null;
+      return commitSubtreeRemap(id, entry, rootPath);
+    },
+
+    moveEntry: async (id, parentId) => {
+      const rootPath = get().drawings?.path ?? null;
+      const entry = await window.api.files.move(id, parentId);
+      if ((get().drawings?.path ?? null) !== rootPath) return null;
+      return commitSubtreeRemap(id, entry, rootPath);
+    },
+
+    copyEntry: async (id, parentId) => {
+      const rootPath = get().drawings?.path ?? null;
+      const created = await window.api.files.copy(id, parentId);
+      if ((get().drawings?.path ?? null) !== rootPath) return null;
+      const root = created[0];
+      if (!root) return null;
+      set((state) => {
+        let entries = state.entries;
+        for (const entry of created) entries = upsertSorted(entries, entry);
+        return { entries, error: null };
       });
-      const activeSessionFileId = sessionOwner.getActiveFileId();
-      if (activeSessionFileId) {
-        const remappedActive = remapId(activeSessionFileId, id, entry.id);
-        if (remappedActive !== activeSessionFileId) {
-          sessionOwner.retargetActive(activeSessionFileId, remappedActive);
-        }
-      }
-
-      const { entries, openFileId, dirtyById, rawDirtyById, recentFileIds, switcherFileIds } =
-        get();
-      const next = applySubtreeRemap(
-        { entries, openFileId, dirtyById, rawDirtyById },
-        id,
-        entry.id,
-        {
-          rootEntry: entry,
-          sort: true,
-        },
-      );
-
-      const pairs = new Map<string, string>();
-      for (const e of entries) {
-        const mapped = remapId(e.id, id, entry.id);
-        if (mapped !== e.id) pairs.set(e.id, mapped);
-      }
-
-      const nextRecentFileIds = remapRecentIds(recentFileIds, (rid) => pairs.get(rid) ?? rid);
-      const recentChanged = !sameIdList(nextRecentFileIds, recentFileIds);
-      const nextSwitcherFileIds = remapRecentIds(switcherFileIds, (rid) => pairs.get(rid) ?? rid);
-      const switcherChanged = !sameIdList(nextSwitcherFileIds, switcherFileIds);
-
-      set({
-        entries: next.entries,
-        openFileId: next.openFileId,
-        dirtyById: next.dirtyById,
-        rawDirtyById: next.rawDirtyById,
-        homeReturnFileId: remapNullableId(get().homeReturnFileId, id, entry.id),
-        ...(recentChanged ? { recentFileIds: nextRecentFileIds } : {}),
-        ...(switcherChanged ? { switcherFileIds: nextSwitcherFileIds } : {}),
-        error: null,
-      });
-      if (recentChanged) persistRecentFileIds(get().drawings?.path ?? null, nextRecentFileIds);
-
-      if (next.openFileId !== openFileId) {
-        void window.api.store.set("lastOpenedFileId", next.openFileId);
-      }
-
-      return entry;
+      return root.id;
     },
 
     deleteEntry: async (id, mode) => {
