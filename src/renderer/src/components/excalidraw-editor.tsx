@@ -1,6 +1,8 @@
 import {
   CaptureUpdateAction,
+  DefaultSidebar,
   Excalidraw,
+  Sidebar,
   WelcomeScreen,
   restoreAppState,
   restoreElements,
@@ -25,6 +27,7 @@ import {
   ArrowLeftIcon,
   FilePlus2Icon,
   FolderOpen,
+  PresentationIcon,
   RefreshCwIcon,
   SearchIcon,
   TriangleAlertIcon,
@@ -34,6 +37,7 @@ import type { ReactNode } from "react";
 
 import { EditorCommandPalette } from "@/components/editor-command-palette";
 import { ErrorBoundary } from "@/components/error-boundary";
+import { PRESENTATION_TAB, PresentationPanel, Presenter } from "@/components/presentation";
 import { Button } from "@/components/ui/button";
 import {
   Empty,
@@ -284,6 +288,10 @@ export const ExcalidrawEditor = ({ fileId }: Props) => {
 
   const [loadError, setLoadError] = useState<{ fileId: string; error: AppError } | null>(null);
   const [excalidrawApi, setExcalidrawApi] = useState<ExcalidrawImperativeAPI | null>(null);
+  const [presenting, setPresenting] = useState(false);
+  const presenterExitRef = useRef<(() => void) | null>(null);
+  const startPresenting = useCallback(() => setPresenting(true), []);
+  const stopPresenting = useCallback(() => setPresenting(false), []);
 
   const libraryAdapter = useMemo(
     () =>
@@ -428,6 +436,12 @@ export const ExcalidrawEditor = ({ fileId }: Props) => {
       if (!excalidrawApi) return undefined;
 
       sceneLoadingRef.current = true;
+      const exitPresentation = presenterExitRef.current;
+      if (exitPresentation) {
+        presenterExitRef.current = null;
+        exitPresentation();
+        stopPresenting();
+      }
       setLoadError((current) => (current?.fileId === fileId ? null : current));
 
       if (fileId === null) {
@@ -517,7 +531,7 @@ export const ExcalidrawEditor = ({ fileId }: Props) => {
 
       return cancel;
     },
-    [fileId, drawingsPath, excalidrawApi, scratch, sceneSwitcher],
+    [fileId, drawingsPath, excalidrawApi, scratch, sceneSwitcher, stopPresenting],
   );
 
   useLayoutEffect(() => {
@@ -836,8 +850,34 @@ export const ExcalidrawEditor = ({ fileId }: Props) => {
             </WelcomeShared>
           )}
           {editorReady && <EditorCommandPalette />}
+          <DefaultSidebar>
+            {excalidrawApi && (
+              <>
+                <DefaultSidebar.TabTriggers>
+                  <Sidebar.TabTrigger
+                    tab={PRESENTATION_TAB}
+                    title="Presentation"
+                    data-prevent-outside-click={true}
+                  >
+                    <PresentationIcon size={16} />
+                  </Sidebar.TabTrigger>
+                </DefaultSidebar.TabTriggers>
+                <Sidebar.Tab tab={PRESENTATION_TAB}>
+                  <PresentationPanel api={excalidrawApi} onStart={startPresenting} />
+                </Sidebar.Tab>
+              </>
+            )}
+          </DefaultSidebar>
         </Excalidraw>
       </ErrorBoundary>
+      {presenting && excalidrawApi && (
+        <Presenter
+          api={excalidrawApi}
+          containerRef={editorRef}
+          exitRef={presenterExitRef}
+          onExit={stopPresenting}
+        />
+      )}
       {loadError && fileId !== null && loadError.fileId === fileId && (
         <div className="bg-background/95 absolute inset-0 z-50 flex items-center justify-center">
           <Empty className="bg-background h-full border-0">
